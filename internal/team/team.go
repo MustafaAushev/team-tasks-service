@@ -33,8 +33,7 @@ func ParseRole(s string) (Role, bool) {
 // CanInvite: приглашать (немедленно добавлять как member) могут owner и admin.
 func CanInvite(actor Role) bool { return actor == RoleOwner || actor == RoleAdmin }
 
-// CanChangeRoles: роли меняет только owner; admin не меняет роли никому (обоснование — README,
-// «Команды и роли»).
+// CanChangeRoles: роли меняет только owner; admin не меняет роли никому.
 func CanChangeRoles(actor Role) bool { return actor == RoleOwner }
 
 // CanManageAllTasks: owner и admin изменяют любые задачи команды.
@@ -44,7 +43,6 @@ func CanManageAllTasks(actor Role) bool { return actor == RoleOwner || actor == 
 func CanViewStats(actor Role) bool { return actor == RoleOwner || actor == RoleAdmin }
 
 // CanRemoveMembers: исключают участников owner и admin; владельца исключить нельзя никому.
-// Исключения нет в ТЗ, эти права задали мы (см. README, «Команды и роли»).
 func CanRemoveMembers(actor Role) bool { return actor == RoleOwner || actor == RoleAdmin }
 
 // IsAssignableRole: сменой роли назначаются только admin и member, но не owner.
