@@ -1,0 +1,7 @@
+.git
+.env
+.claude
+.agents
+openspec
+tests
+*.md
