@@ -81,105 +81,44 @@ make test-deps-down
 Отдельно: `make test-unit`, `make test-integration`, `make test-api`, `make test-race`.
 Integration и API идут на настоящих MySQL и Redis, каждый ответ API сверяется с OpenAPI.
 
-## Пример: от регистрации до исключения
+## Примеры запросов
 
-Сценарий целиком, по шагам; нужен `jq`. Те же шаги автоматически проверяет `make e2e`.
+Полный список методов, тел и ответов — в Swagger UI: http://localhost:8080/docs/.
 
 ```bash
-BASE=http://localhost:8080
-json='Content-Type: application/json'
+API=http://localhost:8080/api/v1
 
-# Регистрация и вход
-for u in ann bob; do
-  curl -s -X POST $BASE/api/v1/register -H "$json" -d '{"email":"'$u'@example.com","password":"password123","name":"'$u'"}'
-done
-login() { curl -s -X POST $BASE/api/v1/login -H "$json" -d '{"email":"'$1'@example.com","password":"password123"}'; }
-ANN=$(login ann | jq -r .access_token)
-BOB=$(login bob | jq -r .access_token); BOB_ID=$(login bob | jq -r .user.id)
+curl -X POST $API/register -H 'Content-Type: application/json' \
+  -d '{"email":"ann@example.com","password":"password123","name":"Ann"}'
+TOKEN=$(curl -s -X POST $API/login -H 'Content-Type: application/json' \
+  -d '{"email":"ann@example.com","password":"password123"}' | jq -r .access_token)
 
-# Команда: Ann — owner, Bob приглашён по своему ID (сразу member, без принятия)
-TEAM=$(curl -s -X POST $BASE/api/v1/teams -H "Authorization: Bearer $ANN" -H "$json" -d '{"name":"Platform"}' | jq -r .id)
-curl -s -X POST $BASE/api/v1/teams/$TEAM/invite -H "Authorization: Bearer $ANN" -H "$json" -d '{"user_id":"'$BOB_ID'"}'
+curl -X POST $API/teams -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"Platform"}'
+curl -X POST $API/tasks -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"team_id":"<TEAM_ID>","title":"Подготовить релиз"}'
+curl "$API/tasks?team_id=<TEAM_ID>&status=todo&limit=20&offset=0" -H "Authorization: Bearer $TOKEN"
 
-# Задача на Bob; Bob как исполнитель меняет только статус
-TASK=$(curl -s -X POST $BASE/api/v1/tasks -H "Authorization: Bearer $ANN" -H "$json" \
-  -d '{"team_id":"'$TEAM'","title":"Подготовить релиз","assignee_id":"'$BOB_ID'"}' | jq -r .id)
-curl -s -X PUT $BASE/api/v1/tasks/$TASK -H "Authorization: Bearer $BOB" -H "$json" -d '{"version":1,"status":"done"}'
+# version обязательна; устаревшая — 409 task_version_conflict
+curl -X PUT $API/tasks/<TASK_ID> -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"version":1,"status":"done"}'
 
-# Устаревшая version — 409; читаем заново и повторяем
-curl -s -X PUT $BASE/api/v1/tasks/$TASK -H "Authorization: Bearer $ANN" -H "$json" -d '{"version":1,"title":"Релиз 1.0"}'
-#   {"code":"task_version_conflict",...,"details":{"current_version":2,"expected_version":1}}
-V=$(curl -s $BASE/api/v1/tasks/$TASK -H "Authorization: Bearer $ANN" | jq .version)
-curl -s -X PUT $BASE/api/v1/tasks/$TASK -H "Authorization: Bearer $ANN" -H "$json" -d '{"version":'$V',"title":"Релиз 1.0"}'
-
-# Списки: offset (как в ТЗ) и cursor
-curl -s "$BASE/api/v1/tasks?team_id=$TEAM&status=done&assignee_id=$BOB_ID&limit=20&offset=0" -H "Authorization: Bearer $BOB"
-curl -s "$BASE/api/v1/tasks?team_id=$TEAM&pagination=cursor&limit=20" -H "Authorization: Bearer $BOB"   # next_cursor → ?cursor=
-
-# Комментарий, история, отчёт
-curl -s -X POST $BASE/api/v1/tasks/$TASK/comments -H "Authorization: Bearer $BOB" -H "$json" -d '{"content":"Готово"}'
-curl -s $BASE/api/v1/tasks/$TASK/history -H "Authorization: Bearer $BOB"
-curl -s $BASE/api/v1/teams/$TEAM/stats -H "Authorization: Bearer $ANN"      # Bob (member) получит 403
-
-# Исключение в два шага: сначала 409 с числом назначений, затем подтверждение JSON-телом — 204
-curl -s -X DELETE $BASE/api/v1/teams/$TEAM/members/$BOB_ID -H "Authorization: Bearer $ANN"
-#   {"code":"member_has_assigned_tasks",...,"details":{"assigned_tasks_count":1}}
-curl -s -X DELETE $BASE/api/v1/teams/$TEAM/members/$BOB_ID -H "Authorization: Bearer $ANN" -H "$json" -d '{"confirm_unassign":true}'
-curl -s "$BASE/api/v1/tasks?team_id=$TEAM" -H "Authorization: Bearer $BOB"  # 404: Bob больше не в команде
+curl $API/teams/<TEAM_ID>/stats -H "Authorization: Bearer $TOKEN"
 ```
-
-## Права
-
-<!-- permissions:start -->
-| Действие | owner | admin | member |
-| --- | --- | --- | --- |
-| Приглашать пользователей (только как member) | да | да | нет |
-| Менять роли участников (admin ↔ member) | да | нет | нет |
-| Исключать участников (кроме owner и себя) | да | да | нет |
-| Изменять любые поля любой задачи команды | да | да | нет |
-| Изменять все поля своей задачи (автор) | да | да | да |
-| Изменять status чужой задачи, назначенной на себя | да | да | да |
-| Изменять title, description, assignee_id чужой задачи, назначенной на себя | да | да | нет |
-| Изменять чужую задачу, не назначенную на себя | да | да | нет |
-| Читать задачи, историю, комментарии; создавать задачи и комментарии | да | да | да |
-| Смотреть статистику команды | да | да | нет |
-<!-- permissions:end -->
-
-Роли живут внутри команды и читаются из MySQL на каждый запрос (в JWT только `user_id`), поэтому смена роли
-и исключение действуют сразу. Право проверяется по каждому переданному полю: исполнитель, приславший
-`title` вместе со `status`, получает 403.
 
 ## Как устроено
 
 - **Конкурентные правки.** В `PUT` обязательна `version` — версия, которую клиент прочитал. Запись идёт
   условным `UPDATE … WHERE version = ?`; если кто-то успел раньше — `409 task_version_conflict`, ничего не
   теряется, клиент перечитывает задачу и повторяет. Изменение, запись истории и сброс кеша — одна транзакция.
-- **Состав команды и записи.** Записи задач блокируют строку команды `FOR SHARE`, изменения состава —
-  `FOR UPDATE`. Поэтому запись всегда видит актуальные роли, а назначение не проскочит параллельно с
-  исключением исполнителя.
 - **Кеш.** В Redis на 5 минут кешируется только `GET /tasks`; ключ учитывает команду, фильтры и страницу.
   У команды есть ревизия в MySQL: создание или изменение задачи увеличивает её в той же транзакции, и все
   старые ключи команды перестают использоваться. Перед кешем всегда проверяется членство. При сбое Redis
   список читается из MySQL; после 5 отказов подряд circuit breaker на 30 секунд перестаёт ходить в Redis,
   затем одна проба.
-- **Отчёт** `GET /teams/{id}/stats` (owner и admin) — один SQL-запрос с CTE: задачи по статусам; топ-3
-  исполнителей по задачам, закрытым за последние 30 суток; среднее время закрытия в сутках; общее число
-  комментариев к задачам команды. Комментарии считаются отдельно и не умножают остальные агрегаты.
-- **Лимиты.** Token bucket в памяти процесса, при превышении — `429` с `Retry-After`. От Redis не зависит.
-- **Ошибки.** Транзакция после deadlock или тайм-аута блокировки повторяется до двух раз; недоступность
-  MySQL — `503 dependency_unavailable`. `/health/ready` проверяет MySQL и схему, Redis не требует.
-  По `SIGTERM` сервер дожидается активных запросов и закрывает пулы.
-- **Логи** — JSON в stdout. ID сущностей и `request_id` (он же заголовок `X-Request-ID`) — на верхнем
-  уровне, HTTP-поля — в `meta`, путь — без query. Любой статус от 400 пишется на `error`. Пароли, токены,
-  тела запросов и `Authorization` не логируются.
-
-  ```json
-  {"timestamp":"2026-10-27T11:12:42.592757199Z","level":"error",
-   "message":"/api/v1/tasks/01a17d0f-fe3f-7231-80b2-46be60b0f43a: Версия задачи изменилась",
-   "context":"http","request_id":"01a17d0f-fe5f-7da8-b4fe-e275edde4547",
-   "user_id":"01a17d0f-fb2a-7936-a6db-9710f8b66945","task_id":"01a17d0f-fe3f-7231-80b2-46be60b0f43a",
-   "meta":{"duration_ms":0.86,"error_code":"task_version_conflict","method":"PUT","route":"/api/v1/tasks/{id}","status":409}}
-  ```
+- **Отчёт** — один SQL-запрос с CTE: задачи по статусам; топ-3 исполнителей по задачам, закрытым за
+  последние 30 суток; среднее время закрытия в сутках; общее число комментариев к задачам команды.
+  Комментарии считаются отдельно и не умножают остальные агрегаты.
 
 ## Допущения и ограничения сервиса
 
@@ -217,6 +156,8 @@ curl -s "$BASE/api/v1/tasks?team_id=$TEAM" -H "Authorization: Bearer $BOB"  # 40
 **Задачи.**
 - `version` относится ко всей задаче: два клиента с одной версией не применят правки даже к разным полям.
   Автоматического слияния нет. Частичное обновление сделано через `PUT`, как в ТЗ.
+- Право проверяется по каждому переданному полю, даже если значение не меняется: исполнитель, приславший
+  `title` вместе со `status`, получает 403.
 - Статусы фиксированы: `todo`, `in_progress`, `done`, переходы любые при наличии права. Переход в `done`
   ставит `closed_at`, выход из `done` очищает его.[^statuses]
 - Курсоры сервер не хранит: клиент передаёт `next_cursor` как есть, токен подписан `CURSOR_SECRET`.
