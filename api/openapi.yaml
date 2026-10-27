@@ -1,0 +1,1719 @@
+openapi: 3.0.3
+info:
+  title: Team Tasks Service API
+  version: 1.0.0
+  description: |
+    REST API управления задачами в командах.
+
+    ## Общие правила
+
+    * **Идентификаторы** пользователей, команд, задач, записей истории и комментариев — строки
+      UUID **версии 7** (`019a2467-2c00-7a23-8d49-b7c0a4e52f15`). Во входных данных регистр hex
+      не важен, в ответах всегда нижний. Числа, nil UUID и UUID других версий отклоняются с HTTP 422.
+      Версия UUID не связана с числовым полем `version` задачи.
+    * **Аутентификация.** Все маршруты `/api/v1`, кроме `POST /register` и `POST /login`, требуют
+      заголовок `Authorization: Bearer <access_token>`. Роли в командах в токене не хранятся и
+      проверяются по текущему членству на каждый запрос.
+    * **Время** — RFC 3339 в UTC.
+    * **Ошибки** имеют единый вид `{code, message, request_id, details?}`. Тело запроса — не более
+      1 MiB; неизвестные поля отклоняются.
+    * **Частичное обновление задачи** выполняется методом `PUT /tasks/{id}` (так задан контракт):
+      передаются только изменяемые поля и **обязательная** `version`. Отсутствующее поле не меняется,
+      `assignee_id: null` снимает исполнителя, `null` для остальных полей — ошибка 422.
+    * **Оптимистическая блокировка.** Если `version` не совпала с текущей, возвращается 409
+      `task_version_conflict` — даже при совпадающих значениях полей. Клиент заново читает задачу,
+      сверяет правку и отправляет новый запрос; сервер версию сам не подставляет и изменения не сливает.
+    * **Пагинация.** Задачи: `offset` (по умолчанию) или `cursor`. История и комментарии — только
+      `cursor`. Клиент передаёт `next_cursor` из ответа как `cursor` целиком, без разбора; `null`
+      означает конец списка.
+    * **Роли** действуют внутри команды: owner — создатель команды (единственный, неизменный), admin
+      и member назначаются. Матрица прав — в README («Команды и роли»). Чужая команда и её ресурсы
+      неотличимы от несуществующих (404).
+    * `DELETE /teams/{id}/members/{user_id}` принимает необязательное **JSON-тело**
+      `{"confirm_unassign": true}`: клиент должен передавать тело, а не только URL.
+servers:
+  - url: http://localhost:8080
+    description: Локальный запуск через Docker Compose
+tags:
+  - name: Auth
+  - name: Teams
+  - name: Tasks
+  - name: History and comments
+  - name: Statistics
+  - name: Service
+security:
+  - bearerAuth: []
+paths:
+  /api/v1/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      summary: Регистрация пользователя
+      description: |
+        Создаёт учётную запись без подтверждения email — для входа достаточно зарегистрироваться.
+        Владение адресом не проверяется (см. README, «Допущения и ограничения»). Email
+        нормализуется: внешние пробелы удаляются, регистр приводится к нижнему.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              email: ann@example.com
+              password: correct horse battery
+              name: Ann
+      responses:
+        '201':
+          description: Пользователь создан. Поле `id` — идентификатор, который коллеги используют для приглашения.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              example:
+                id: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                email: ann@example.com
+                name: Ann
+                created_at: '2026-01-15T10:00:00.123456Z'
+        '400':
+          $ref: '#/components/responses/InvalidJSON'
+        '409':
+          description: Email уже зарегистрирован (`email_already_exists`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: email_already_exists
+                message: Пользователь с таким email уже зарегистрирован
+                request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f16
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/Validation'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Вход и получение JWT
+      description: |
+        Возвращает access token (HS256) со сроком жизни из настройки `JWT_TTL` (1 час по умолчанию).
+        Для неизвестного email и неверного пароля ответ одинаков (`invalid_credentials`).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: ann@example.com
+              password: correct horse battery
+      responses:
+        '200':
+          description: Вход выполнен.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+              example:
+                access_token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIwMTlhMjQ2Ny0yYzAwLTdhMjMtOGQ0OS1iN2MwYTRlNTJmMTUifQ.signature
+                token_type: Bearer
+                expires_in: 3600
+                user:
+                  id: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                  email: ann@example.com
+                  name: Ann
+                  created_at: '2026-01-15T10:00:00.123456Z'
+        '400':
+          $ref: '#/components/responses/InvalidJSON'
+        '401':
+          description: Неверные реквизиты (`invalid_credentials`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: invalid_credentials
+                message: Неверный email или пароль
+                request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f17
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/Validation'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/teams:
+    post:
+      tags: [Teams]
+      operationId: createTeam
+      summary: Создать команду
+      description: Создаёт команду; текущий пользователь становится её единственным владельцем (`owner`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTeamRequest'
+            example:
+              name: Platform
+      responses:
+        '201':
+          description: Команда создана.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Team'
+              example:
+                id: 019a2468-0a00-7b11-9c22-3d4e5f607182
+                name: Platform
+                created_by: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                created_at: '2026-01-15T10:05:00.000000Z'
+                role: owner
+        '400':
+          $ref: '#/components/responses/InvalidJSON'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/Validation'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    get:
+      tags: [Teams]
+      operationId: listTeams
+      summary: Свои команды
+      description: Возвращает все команды текущего пользователя с его ролью, порядок по `id` по возрастанию.
+      responses:
+        '200':
+          description: Список команд.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Team'
+              example:
+                items:
+                  - id: 019a2468-0a00-7b11-9c22-3d4e5f607182
+                    name: Platform
+                    created_by: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                    created_at: '2026-01-15T10:05:00.000000Z'
+                    role: owner
+                  - id: 019a2468-7f00-7c12-8d33-4e5f60718293
+                    name: Mobile
+                    created_by: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f
+                    created_at: '2026-01-16T08:00:00.000000Z'
+                    role: admin
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/teams/{id}/members:
+    get:
+      tags: [Teams]
+      operationId: listMembers
+      summary: Состав команды
+      description: Доступно участникам команды. Порядок по `user_id` по возрастанию.
+      parameters:
+        - $ref: '#/components/parameters/TeamId'
+      responses:
+        '200':
+          description: Участники команды.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Member'
+              example:
+                items:
+                  - user_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                    name: Ann
+                    role: owner
+                  - user_id: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f
+                    name: Bob
+                    role: member
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Validation'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/teams/{id}/invite:
+    post:
+      tags: [Teams]
+      operationId: inviteMember
+      summary: Пригласить пользователя по ID
+      description: |
+        Доступно owner и admin. Пользователь добавляется **немедленно** с ролью `member`, принятие
+        приглашения и почта не требуются. Поле `role` отклоняется (422): роль `admin` назначает owner
+        отдельным запросом смены роли. Приглашаемый сам сообщает свой ID из ответа регистрации или входа
+        (поиска пользователей нет).
+
+        Ответы: неучастник команды — 404 (команда не раскрывается); member — 403; отсутствующий
+        пользователь — 404; уже участник — 409 `member_already_exists`.
+      parameters:
+        - $ref: '#/components/parameters/TeamId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteRequest'
+            example:
+              user_id: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f
+      responses:
+        '201':
+          description: Участник добавлен с ролью `member`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+              example:
+                team_id: 019a2468-0a00-7b11-9c22-3d4e5f607182
+                user_id: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f
+                role: member
+        '400':
+          $ref: '#/components/responses/InvalidJSON'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          description: Некорректное тело, в том числе попытка передать `role` (`validation_error`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: validation_error
+                message: Данные запроса не прошли проверку
+                request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f30
+                details:
+                  fields:
+                    role: неизвестное поле
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/teams/{id}/members/{user_id}/role:
+    put:
+      tags: [Teams]
+      operationId: changeMemberRole
+      summary: Сменить роль участника
+      description: |
+        Только owner назначает существующему участнику роль `admin` или `member`. Роль и членство
+        owner неизменны; назначить owner нельзя (422). Admin роли не меняет никому (403): в ТЗ право
+        «менять роли» перечислено только у owner, а для admin указан лишь запрет менять роль создателя
+        (подробно — README, «Допущения и ограничения» → «Команды и роли»). Новая роль действует со
+        следующего запроса без перевыдачи токена: права читаются из MySQL.
+      parameters:
+        - $ref: '#/components/parameters/TeamId'
+        - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangeRoleRequest'
+            example:
+              role: admin
+      responses:
+        '200':
+          description: Роль изменена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Membership'
+              example:
+                team_id: 019a2468-0a00-7b11-9c22-3d4e5f607182
+                user_id: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f
+                role: admin
+        '400':
+          $ref: '#/components/responses/InvalidJSON'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          description: Недопустимая роль (`validation_error`) или попытка изменить роль владельца (`owner_role_immutable`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                grantOwner:
+                  summary: Выдать роль owner нельзя
+                  value:
+                    code: validation_error
+                    message: Данные запроса не прошли проверку
+                    request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f31
+                    details:
+                      fields:
+                        role: допустимы только admin и member
+                ownerImmutable:
+                  summary: Роль владельца неизменна
+                  value:
+                    code: owner_role_immutable
+                    message: Роль владельца команды изменить нельзя
+                    request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f32
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/teams/{id}/members/{user_id}:
+    delete:
+      tags: [Teams]
+      operationId: removeMember
+      summary: Исключить участника (с подтверждением снятия назначений)
+      description: |
+        Доступно owner и admin. Нельзя исключить owner или самого себя (422).
+
+        **Два шага при наличии назначений.** Если у участника есть назначенные задачи команды
+        (в любом статусе), а `confirm_unassign` не равен `true`, возвращается 409
+        `member_has_assigned_tasks` с `details.assigned_tasks_count`, ничего не меняется.
+        Повторите запрос **с JSON-телом** `{"confirm_unassign": true}`: все назначения на момент
+        второго запроса будут сняты (с записью в историю), затем участник исключён.
+        Без назначений подтверждение не требуется. Повтор запроса для уже исключённого участника
+        возвращает 204 (права отправителя проверяются и при повторе).
+
+        **Область подтверждения** — все задачи **этой** команды, назначенные участнику на момент второго
+        запроса, в любом статусе, включая появившиеся после предупреждения; число из 409 не резервируется.
+
+        **Побочные изменения** (одна транзакция, при ошибке откатывается всё): у каждой такой задачи
+        `assignee_id` становится `null`, `version` увеличивается на 1, `updated_at` обновляется, статус и
+        `closed_at` не меняются; в историю пишется запись `{"assignee_id": {"old": "<user_id>", "new": null}}`
+        с автором — тем, кто исключает. Затем удаляется членство, кешированные списки задач команды
+        сбрасываются. Учётная запись, авторство задач и комментариев, назначения и членства в других
+        командах сохраняются. Клиенты, прочитавшие такую задачу раньше, получат на PUT со старой
+        `version` 409 `task_version_conflict`. Исключённый пользователь со старым JWT получает 404.
+
+        ```
+        DELETE /api/v1/teams/{id}/members/{user_id}                           → 409, assigned_tasks_count: 2
+        DELETE /api/v1/teams/{id}/members/{user_id}  {"confirm_unassign":true} → 204
+        ```
+      parameters:
+        - $ref: '#/components/parameters/TeamId'
+        - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RemoveMemberRequest'
+            examples:
+              confirm:
+                summary: Подтверждение снятия назначений
+                value:
+                  confirm_unassign: true
+      responses:
+        '204':
+          description: Участник исключён (или уже не состоит в команде).
+        '400':
+          $ref: '#/components/responses/InvalidJSON'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: У участника есть назначенные задачи, подтверждение не получено (`member_has_assigned_tasks`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: member_has_assigned_tasks
+                message: У участника есть назначенные задачи
+                request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f18
+                details:
+                  assigned_tasks_count: 2
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          description: |
+            `owner_cannot_be_removed` — владельца исключить нельзя; `self_removal_not_supported` —
+            самостоятельный выход не поддерживается; `validation_error` — `confirm_unassign` не boolean,
+            лишние поля или ID пути не UUIDv7.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                owner:
+                  summary: Попытка исключить владельца
+                  value:
+                    code: owner_cannot_be_removed
+                    message: Владельца команды исключить нельзя
+                    request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f31
+                self:
+                  summary: Исключение самого себя
+                  value:
+                    code: self_removal_not_supported
+                    message: Самостоятельный выход из команды не поддерживается
+                    request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f32
+                flag:
+                  summary: confirm_unassign не boolean
+                  value:
+                    code: validation_error
+                    message: Данные запроса не прошли проверку
+                    request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f33
+                    details:
+                      fields:
+                        confirm_unassign: ожидается true или false
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/teams/{team_id}/stats:
+    get:
+      tags: [Statistics]
+      operationId: getTeamStats
+      summary: Статистика команды
+      description: |
+        Доступно owner и admin (member получает 403, неучастник — 404). Все метрики считаются одним
+        SQL-запросом на единый момент `as_of` (UTC).
+
+        * `tasks_by_status` — текущие задачи по статусам, включая нули.
+        * `top_assignees` — до трёх **текущих** исполнителей по числу задач `done` с `closed_at` в
+          интервале `[as_of − 30 суток, as_of]`; порядок: число по убыванию, затем `user_id` по возрастанию.
+        * `average_close_time_days` — среднее время от `created_at` до `closed_at` всех текущих `done`
+          за всё время, в сутках по 24 часа, 6 знаков; `null` без закрытых задач.
+        * `comments_total` и `comments_by_task` — по всем задачам команды (включая нули, порядок `task_id`
+          по возрастанию, без пагинации).
+
+        Метрики считаются по **текущему** состоянию задач, а не по журналу: переназначенная закрытая задача
+        засчитывается новому исполнителю, снятие исполнителя или исключение участника убирает его задачи из
+        топа, повторно открытая задача не считается закрытой до нового закрытия.
+      parameters:
+        - $ref: '#/components/parameters/StatsTeamId'
+      responses:
+        '200':
+          description: Отчёт по команде.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TeamStats'
+              # Пример воспроизводится тестом TestTeamStatsMatchesOpenAPIExample: четыре задачи команды,
+              # две закрыты исполнителем Ann за 1 и 3 суток, у задач 2 и 3 комментария.
+              example:
+                as_of: '2026-01-31T12:00:00Z'
+                tasks_by_status:
+                  todo: 1
+                  in_progress: 1
+                  done: 2
+                top_assignees:
+                  - user_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                    name: Ann
+                    closed_tasks_count: 2
+                average_close_time_days: 2
+                comments_total: 5
+                comments_by_task:
+                  - task_id: 019a246a-1000-7d44-b222-112233445566
+                    comments_count: 2
+                  - task_id: 019a246a-2000-7e55-8333-223344556677
+                    comments_count: 0
+                  - task_id: 019a246a-3000-7f66-9444-334455667788
+                    comments_count: 3
+                  - task_id: 019a246a-4000-7a77-a555-445566778899
+                    comments_count: 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Validation'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/tasks:
+    post:
+      tags: [Tasks]
+      operationId: createTask
+      summary: Создать задачу
+      description: |
+        Доступно любому участнику команды. Автор берётся из токена. `version` клиентом не задаётся —
+        сервер устанавливает 1. Исполнитель должен быть участником той же команды. Статус по умолчанию `todo`;
+        создание со статусом `done` сразу устанавливает `closed_at`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTaskRequest'
+            example:
+              team_id: 019a2468-0a00-7b11-9c22-3d4e5f607182
+              title: Подготовить релиз
+              description: Собрать changelog и проверить миграции
+              assignee_id: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f
+      responses:
+        '201':
+          description: Задача создана (`version` равна 1).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example:
+                id: 019a246a-1000-7d44-b222-112233445566
+                team_id: 019a2468-0a00-7b11-9c22-3d4e5f607182
+                title: Подготовить релиз
+                description: Собрать changelog и проверить миграции
+                status: todo
+                created_by: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                assignee_id: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f
+                version: 1
+                created_at: '2026-01-15T11:00:00.000000Z'
+                updated_at: '2026-01-15T11:00:00.000000Z'
+                closed_at: null
+        '400':
+          $ref: '#/components/responses/InvalidJSON'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          description: Ошибка полей (`validation_error`) или исполнитель не состоит в команде (`assignee_not_in_team`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                assigneeNotInTeam:
+                  summary: Исполнитель вне команды
+                  value:
+                    code: assignee_not_in_team
+                    message: Исполнитель не состоит в команде задачи
+                    request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f33
+                clientVersion:
+                  summary: version при создании не принимается
+                  value:
+                    code: validation_error
+                    message: Данные запроса не прошли проверку
+                    request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f34
+                    details:
+                      fields:
+                        version: неизвестное поле
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    get:
+      tags: [Tasks]
+      operationId: listTasks
+      summary: Список задач команды
+      description: |
+        Обязательный `team_id` проверяется на членство. Фильтры `status` и `assignee_id` объединяются по И.
+        Порядок — `id` по убыванию.
+
+        * `pagination=offset` (по умолчанию): ответ содержит `total`; режим оставлен для совместимости.
+        * `pagination=cursor`: первая страница без `cursor`, следующая — с `next_cursor` из ответа,
+          переданным целиком; `null` — конец списка. Следующая страница содержит задачи с `id` меньше
+          последнего прочитанного, поэтому новые задачи (с бо́льшими UUIDv7) не вызывают повторов.
+          `offset` в этом режиме запрещён, `total` не возвращается, `limit` можно менять. Смена команды
+          или фильтров при продолжении, повреждённый или чужой курсор — 422 `invalid_cursor`.
+          Сервер курсоры не хранит: позиция восстанавливается из подписанного токена.
+
+        Отдельные страницы не образуют общего снимка: изменения между запросами могут менять состав
+        следующих страниц.
+      parameters:
+        - name: team_id
+          in: query
+          required: true
+          schema:
+            $ref: '#/components/schemas/UUIDv7'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/TaskStatus'
+        - name: assignee_id
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/UUIDv7'
+        - name: pagination
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [offset, cursor]
+            default: offset
+        - $ref: '#/components/parameters/Limit'
+        - name: offset
+          in: query
+          required: false
+          description: Только для `pagination=offset`.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Страница задач.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Task'
+                  pagination:
+                    oneOf:
+                      - $ref: '#/components/schemas/OffsetPagination'
+                      - $ref: '#/components/schemas/CursorPagination'
+              examples:
+                offset:
+                  summary: Режим offset
+                  value:
+                    items:
+                      - id: 019a246a-1000-7d44-b222-112233445566
+                        team_id: 019a2468-0a00-7b11-9c22-3d4e5f607182
+                        title: Подготовить релиз
+                        description: ''
+                        status: todo
+                        created_by: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                        assignee_id: null
+                        version: 1
+                        created_at: '2026-01-15T11:00:00.000000Z'
+                        updated_at: '2026-01-15T11:00:00.000000Z'
+                        closed_at: null
+                    pagination:
+                      mode: offset
+                      limit: 20
+                      offset: 0
+                      total: 1
+                cursorFirst:
+                  summary: 'Режим cursor: первая страница (?pagination=cursor&limit=1)'
+                  value:
+                    items:
+                      - id: 019a246a-2000-7e55-8333-223344556677
+                        team_id: 019a2468-0a00-7b11-9c22-3d4e5f607182
+                        title: Обновить зависимости
+                        description: ''
+                        status: in_progress
+                        created_by: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                        assignee_id: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f
+                        version: 2
+                        created_at: '2026-01-15T11:30:00.000000Z'
+                        updated_at: '2026-01-15T12:00:00.000000Z'
+                        closed_at: null
+                    pagination:
+                      mode: cursor
+                      limit: 1
+                      next_cursor: eyJrIjoidGFza3MiLCJ0ZWFtIjoiMDE5YTI0NjgtMGEwMC03YjExLTljMjItM2Q0ZTVmNjA3MTgyIiwibGFzdF9pZCI6IjAxOWEyNDZhLTIwMDAtN2U1NS04MzMzLTIyMzM0NDU1NjY3NyJ9.qJ5v0pV4oQ8n6sQx5Yy1m8b0K7lH3zR2tW9cX4dE6fA
+                cursorLast:
+                  summary: 'Режим cursor: последняя страница (тот же запрос с cursor=<next_cursor>)'
+                  value:
+                    items:
+                      - id: 019a246a-1000-7d44-b222-112233445566
+                        team_id: 019a2468-0a00-7b11-9c22-3d4e5f607182
+                        title: Подготовить релиз
+                        description: ''
+                        status: todo
+                        created_by: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                        assignee_id: null
+                        version: 1
+                        created_at: '2026-01-15T11:00:00.000000Z'
+                        updated_at: '2026-01-15T11:00:00.000000Z'
+                        closed_at: null
+                    pagination:
+                      mode: cursor
+                      limit: 1
+                      next_cursor: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Validation'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/tasks/{id}:
+    get:
+      tags: [Tasks]
+      operationId: getTask
+      summary: Получить задачу
+      description: Доступно участникам команды задачи. Чужая или отсутствующая задача — 404. Ответ содержит текущую `version`.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: Задача.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example:
+                id: 019a246a-1000-7d44-b222-112233445566
+                team_id: 019a2468-0a00-7b11-9c22-3d4e5f607182
+                title: Подготовить релиз
+                description: Собрать changelog и проверить миграции
+                status: in_progress
+                created_by: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                assignee_id: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f
+                version: 3
+                created_at: '2026-01-15T11:00:00.000000Z'
+                updated_at: '2026-01-15T12:30:00.000000Z'
+                closed_at: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Validation'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    put:
+      tags: [Tasks]
+      operationId: updateTask
+      summary: Частично обновить задачу
+      description: |
+        Меняет только переданные поля из `title`, `description`, `status`, `assignee_id`; требуется
+        хотя бы одно из них. **`version` обязательна** — это версия задачи, прочитанная клиентом, а не
+        новое значение. Три состояния поля: нет ключа — без изменений; значение — изменить;
+        `null` допустим **только** для `assignee_id` (снимает исполнителя). Описание очищается пустой строкой.
+
+        Права: owner/admin меняют любые задачи; member — все четыре поля своей задачи (автор) и только
+        `status` чужой назначенной на него задачи. Право проверяется для каждого переданного поля.
+
+        При несовпадении `version` — 409 `task_version_conflict` с `details.expected_version`
+        (присланная) и `details.current_version`, даже если значения полей совпадают. Если версия верна,
+        но фактических изменений нет, возвращается 200 без новой версии и записи в историю. Одна операция
+        с несколькими полями увеличивает `version` один раз.
+
+        Серверные поля (`id`, `team_id`, `created_by`, `created_at`, `updated_at`, `closed_at`) отклоняются.
+
+        **Статусы.** `todo`, `in_progress`, `done`, любые переходы. Переход в `done` ставит `closed_at`,
+        выход из `done` очищает его, изменение других полей закрытой задачи дату закрытия не сдвигает.
+
+        **Сценарий конфликта.** 1) `GET /tasks/{id}` → `version: 3`. 2) Другой клиент успел обновить
+        задачу до версии 4. 3) `PUT {"version": 3, "title": "…"}` → 409 с `expected_version: 3`,
+        `current_version: 4`. 4) Клиент снова читает задачу, сверяет правку с новым состоянием и
+        5) отправляет `PUT {"version": 4, "title": "…"}` → 200, `version: 5`.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTaskRequest'
+            examples:
+              partial:
+                summary: Частичное обновление (прочитанная версия 3)
+                value:
+                  version: 3
+                  status: done
+              unassign:
+                summary: Снять исполнителя
+                value:
+                  version: 4
+                  assignee_id: null
+              clearDescription:
+                summary: Очистить описание пустой строкой
+                value:
+                  version: 5
+                  description: ''
+              retryAfterConflict:
+                summary: Повтор после 409 и нового чтения (актуальная версия 4)
+                value:
+                  version: 4
+                  title: Подготовить релиз 1.0
+      responses:
+        '200':
+          description: Задача обновлена (или изменений не было).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+              example:
+                id: 019a246a-1000-7d44-b222-112233445566
+                team_id: 019a2468-0a00-7b11-9c22-3d4e5f607182
+                title: Подготовить релиз
+                description: Собрать changelog и проверить миграции
+                status: done
+                created_by: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                assignee_id: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f
+                version: 4
+                created_at: '2026-01-15T11:00:00.000000Z'
+                updated_at: '2026-01-15T13:00:00.000000Z'
+                closed_at: '2026-01-15T13:00:00.000000Z'
+        '400':
+          $ref: '#/components/responses/InvalidJSON'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Версия задачи изменилась (`task_version_conflict`). Прочитайте задачу заново и повторите правку с актуальной `version`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: task_version_conflict
+                message: Версия задачи изменилась
+                request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f19
+                details:
+                  expected_version: 3
+                  current_version: 4
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/Validation'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/tasks/{id}/history:
+    get:
+      tags: [History and comments]
+      operationId: getTaskHistory
+      summary: История изменений задачи
+      description: |
+        Неизменяемый журнал, порядок по `task_version` по возрастанию (ревизии 1, 2, 3…). Каждая ревизия
+        задачи имеет ровно одну запись: первая — создание (начальные значения с `old: null`), далее —
+        только фактически изменённые поля, включая автоматический `closed_at`. Отклонённые обновления
+        (409, 403) и no-op записей не создают. ID внутри `changes` — UUID-строки или `null`.
+
+        Только курсорная пагинация: первая страница без `cursor`, далее `next_cursor` целиком (продолжение
+        с `task_version` больше последней прочитанной); `null` — конец. Курсор другой задачи, списка
+        комментариев или повреждённый — 422 `invalid_cursor`; `offset` отклоняется (422). Сервер выданные
+        курсоры не хранит.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Страница истории.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/HistoryEntry'
+                  pagination:
+                    $ref: '#/components/schemas/CursorPagination'
+              examples:
+                firstPage:
+                  summary: Первая страница (?limit=2), есть продолжение
+                  value:
+                    items:
+                      - id: 019a246a-1001-7f66-9444-33445566778a
+                        task_id: 019a246a-1000-7d44-b222-112233445566
+                        changed_by: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                        task_version: 1
+                        changes:
+                          title: { old: null, new: Подготовить релиз }
+                          description: { old: null, new: '' }
+                          status: { old: null, new: todo }
+                          created_by: { old: null, new: 019a2467-2c00-7a23-8d49-b7c0a4e52f15 }
+                          assignee_id: { old: null, new: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f }
+                        created_at: '2026-01-15T11:00:00.000000Z'
+                      - id: 019a246a-1002-7f66-9444-33445566778b
+                        task_id: 019a246a-1000-7d44-b222-112233445566
+                        changed_by: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                        task_version: 2
+                        changes:
+                          title: { old: Подготовить релиз, new: Подготовить релиз 1.0 }
+                          assignee_id: { old: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f, new: null }
+                        created_at: '2026-01-15T12:00:00.000000Z'
+                    pagination:
+                      mode: cursor
+                      limit: 2
+                      next_cursor: eyJrIjoidGFza19oaXN0b3J5IiwidGVhbSI6IjAxOWEyNDY4LTBhMDAtN2IxMS05YzIyLTNkNGU1ZjYwNzE4MiIsInRhc2siOiIwMTlhMjQ2YS0xMDAwLTdkNDQtYjIyMi0xMTIyMzM0NDU1NjYiLCJsYXN0X3ZlcnNpb24iOjJ9.Zr3c1mJb2k9yXl0aQ7s4tV6n8pW5eD1fG3hK0uB2xYc
+                lastPage:
+                  summary: Следующая страница (?limit=2&cursor=<next_cursor>), конец журнала
+                  value:
+                    items:
+                      - id: 019a246a-1003-7f66-9444-33445566778c
+                        task_id: 019a246a-1000-7d44-b222-112233445566
+                        changed_by: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f
+                        task_version: 3
+                        changes:
+                          status: { old: todo, new: done }
+                          closed_at: { old: null, new: '2026-01-15T13:00:00Z' }
+                        created_at: '2026-01-15T13:00:00.000000Z'
+                    pagination:
+                      mode: cursor
+                      limit: 2
+                      next_cursor: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Validation'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/tasks/{id}/comments:
+    post:
+      tags: [History and comments]
+      operationId: createComment
+      summary: Добавить комментарий
+      description: |
+        Доступно всем участникам команды. Автор и время определяются сервером. Комментарий не меняет
+        поля, `version` и историю задачи.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCommentRequest'
+            example:
+              content: Проверил миграции, можно выпускать
+      responses:
+        '201':
+          description: Комментарий создан.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comment'
+              example:
+                id: 019a246b-3000-7a77-a555-445566778899
+                task_id: 019a246a-1000-7d44-b222-112233445566
+                user_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                content: Проверил миграции, можно выпускать
+                created_at: '2026-01-15T14:00:00.000000Z'
+        '400':
+          $ref: '#/components/responses/InvalidJSON'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/TooLarge'
+        '422':
+          $ref: '#/components/responses/Validation'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    get:
+      tags: [History and comments]
+      operationId: listComments
+      summary: Комментарии задачи
+      description: |
+        Порядок по `id` по возрастанию (UUIDv7; `created_at` в порядке не участвует), только курсорная
+        пагинация, как у истории: продолжение с `id` больше последнего прочитанного, поэтому комментарии,
+        добавленные между страницами, появятся в конце без повторов. Комментарии исключённого автора
+        сохраняются с прежним авторством; сам исключённый пользователь доступа к ним больше не имеет.
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Страница комментариев.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Comment'
+                  pagination:
+                    $ref: '#/components/schemas/CursorPagination'
+              examples:
+                firstPage:
+                  summary: Первая страница (?limit=1), есть продолжение
+                  value:
+                    items:
+                      - id: 019a246b-3000-7a77-a555-445566778899
+                        task_id: 019a246a-1000-7d44-b222-112233445566
+                        user_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+                        content: Проверил миграции, можно выпускать
+                        created_at: '2026-01-15T14:00:00.000000Z'
+                    pagination:
+                      mode: cursor
+                      limit: 1
+                      next_cursor: eyJrIjoidGFza19jb21tZW50cyIsInRlYW0iOiIwMTlhMjQ2OC0wYTAwLTdiMTEtOWMyMi0zZDRlNWY2MDcxODIiLCJ0YXNrIjoiMDE5YTI0NmEtMTAwMC03ZDQ0LWIyMjItMTEyMjMzNDQ1NTY2IiwibGFzdF9pZCI6IjAxOWEyNDZiLTMwMDAtN2E3Ny1hNTU1LTQ0NTU2Njc3ODg5OSJ9.mT8q2Lw0vR5yA1cB3dE7fG9hJ2kN4pQ6sU8wX0zY1aQ
+                lastPage:
+                  summary: Следующая страница (?limit=1&cursor=<next_cursor>), конец
+                  value:
+                    items:
+                      - id: 019a246b-4000-7b88-b666-5566778899aa
+                        task_id: 019a246a-1000-7d44-b222-112233445566
+                        user_id: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f
+                        content: Согласен
+                        created_at: '2026-01-15T14:05:00.000000Z'
+                    pagination:
+                      mode: cursor
+                      limit: 1
+                      next_cursor: null
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Validation'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /health/live:
+    get:
+      tags: [Service]
+      operationId: healthLive
+      summary: Процесс жив
+      security: []
+      responses:
+        '200':
+          description: Процесс работает.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+  /health/ready:
+    get:
+      tags: [Service]
+      operationId: healthReady
+      summary: Готовность (MySQL и версия схемы)
+      description: Redis условием готовности не является.
+      security: []
+      responses:
+        '200':
+          description: MySQL доступен, схема актуальна.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, schema_version]
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  schema_version:
+                    type: integer
+                    example: 1
+        '503':
+          $ref: '#/components/responses/Unavailable'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token из `POST /login`. `sub` содержит UUIDv7 пользователя.
+  parameters:
+    TeamId:
+      name: id
+      in: path
+      required: true
+      description: UUIDv7 команды.
+      schema:
+        $ref: '#/components/schemas/UUIDv7'
+    StatsTeamId:
+      name: team_id
+      in: path
+      required: true
+      description: UUIDv7 команды. Имя параметра — как в ТЗ для отчёта.
+      schema:
+        $ref: '#/components/schemas/UUIDv7'
+    UserId:
+      name: user_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/UUIDv7'
+    TaskId:
+      name: id
+      in: path
+      required: true
+      description: UUIDv7 задачи.
+      schema:
+        $ref: '#/components/schemas/UUIDv7'
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Значение `next_cursor` из предыдущего ответа, передаётся целиком без разбора.
+      schema:
+        type: string
+  responses:
+    InvalidJSON:
+      description: Некорректный JSON (`invalid_json`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: invalid_json
+            message: Некорректный JSON
+            request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f20
+    Unauthorized:
+      description: Токен отсутствует, просрочен или недействителен (`unauthorized`).
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            example: Bearer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: unauthorized
+            message: Требуется действительный токен доступа
+            request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f21
+    Forbidden:
+      description: |
+        Недостаточно прав внутри доступной команды (`forbidden`): например, member приглашает, admin
+        меняет роль, исполнитель передаёт `title` чужой задачи. Неучастник команды получает 404, а не 403.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: forbidden
+            message: Недостаточно прав для операции
+            request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f22
+    NotFound:
+      description: Ресурс отсутствует либо принадлежит недоступной команде (`not_found`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: not_found
+            message: Ресурс не найден
+            request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f23
+    Conflict:
+      description: Конфликт состояния, например повторное приглашение (`member_already_exists`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: member_already_exists
+            message: Пользователь уже состоит в команде
+            request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f24
+    TooLarge:
+      description: Тело запроса больше 1 MiB (`request_too_large`).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: request_too_large
+            message: Тело запроса превышает 1 MiB
+            request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f25
+    Validation:
+      description: |
+        Ошибка валидации. Коды: `validation_error` (поля — в `details.fields`), `invalid_cursor`
+        (курсор повреждён или выдан для другой выборки), `assignee_not_in_team`, `owner_role_immutable`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: validation_error
+            message: Данные запроса не прошли проверку
+            request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f26
+            details:
+              fields:
+                id: ожидается UUID версии 7
+    RateLimited:
+      description: Превышен лимит запросов (`rate_limit_exceeded`).
+      headers:
+        Retry-After:
+          description: Через сколько секунд повторить запрос.
+          schema:
+            type: integer
+            example: 3
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: rate_limit_exceeded
+            message: Слишком много запросов
+            request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f27
+    Internal:
+      description: Внутренняя ошибка (`internal_error`); подробности клиенту не раскрываются.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: internal_error
+            message: Внутренняя ошибка сервера
+            request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f28
+    Unavailable:
+      description: Зависимость недоступна (`dependency_unavailable`). Это не конфликт версий.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: dependency_unavailable
+            message: Зависимость временно недоступна, повторите запрос позже
+            request_id: 019a2467-2c00-7a23-8d49-b7c0a4e52f29
+  schemas:
+    UUIDv7:
+      type: string
+      format: uuid
+      pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+      description: UUID версии 7 (36 символов с дефисами, регистр hex не важен).
+      example: 019a2467-2c00-7a23-8d49-b7c0a4e52f15
+    NullableUUIDv7:
+      type: string
+      format: uuid
+      nullable: true
+      pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+      description: UUID версии 7 или `null`.
+      example: 019a2469-5b00-7c33-a111-0a1b2c3d4e5f
+    Role:
+      type: string
+      enum: [owner, admin, member]
+    TaskStatus:
+      type: string
+      enum: [todo, in_progress, done]
+      description: Допустимы любые переходы между статусами при наличии права.
+    Error:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        request_id:
+          type: string
+          description: Идентификатор корреляции (также заголовок `X-Request-ID`); не ID сущности.
+        details:
+          type: object
+          additionalProperties: true
+    RegisterRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password, name]
+      properties:
+        email:
+          type: string
+          maxLength: 254
+          example: ann@example.com
+        password:
+          type: string
+          minLength: 8
+          description: Не менее 8 символов и не более 72 байт в UTF-8; не усекается.
+          writeOnly: true
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+          writeOnly: true
+    User:
+      type: object
+      required: [id, email, name, created_at]
+      description: Публичный профиль; пароль и хеш не возвращаются.
+      properties:
+        id:
+          $ref: '#/components/schemas/UUIDv7'
+        email:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    LoginResponse:
+      type: object
+      required: [access_token, token_type, expires_in, user]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_in:
+          type: integer
+          description: Срок жизни токена в секундах.
+        user:
+          $ref: '#/components/schemas/User'
+    CreateTeamRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+    Team:
+      type: object
+      required: [id, name, created_by, created_at, role]
+      properties:
+        id:
+          $ref: '#/components/schemas/UUIDv7'
+        name:
+          type: string
+        created_by:
+          $ref: '#/components/schemas/UUIDv7'
+        created_at:
+          type: string
+          format: date-time
+        role:
+          $ref: '#/components/schemas/Role'
+    Member:
+      type: object
+      required: [user_id, name, role]
+      properties:
+        user_id:
+          $ref: '#/components/schemas/UUIDv7'
+        name:
+          type: string
+        role:
+          $ref: '#/components/schemas/Role'
+    Membership:
+      type: object
+      required: [team_id, user_id, role]
+      properties:
+        team_id:
+          $ref: '#/components/schemas/UUIDv7'
+        user_id:
+          $ref: '#/components/schemas/UUIDv7'
+        role:
+          $ref: '#/components/schemas/Role'
+    InviteRequest:
+      type: object
+      additionalProperties: false
+      required: [user_id]
+      properties:
+        user_id:
+          $ref: '#/components/schemas/UUIDv7'
+    ChangeRoleRequest:
+      type: object
+      additionalProperties: false
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [admin, member]
+    RemoveMemberRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        confirm_unassign:
+          type: boolean
+          default: false
+          description: '`true` подтверждает снятие всех назначений участника в команде.'
+    CreateTaskRequest:
+      type: object
+      additionalProperties: false
+      required: [team_id, title]
+      properties:
+        team_id:
+          $ref: '#/components/schemas/UUIDv7'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description:
+          type: string
+          maxLength: 10000
+          default: ''
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        assignee_id:
+          $ref: '#/components/schemas/NullableUUIDv7'
+    UpdateTaskRequest:
+      type: object
+      additionalProperties: false
+      required: [version]
+      description: |
+        Требуется хотя бы одно из `title`, `description`, `status`, `assignee_id`.
+        Отсутствие ключа и `null` различаются: `null` допустим только для `assignee_id`.
+      properties:
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Версия задачи, прочитанная клиентом (условие обновления, не новое значение).
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description:
+          type: string
+          maxLength: 10000
+          description: Очищается пустой строкой; `null` недопустим.
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        assignee_id:
+          $ref: '#/components/schemas/NullableUUIDv7'
+    Task:
+      type: object
+      required: [id, team_id, title, description, status, created_by, assignee_id, version, created_at, updated_at, closed_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/UUIDv7'
+        team_id:
+          $ref: '#/components/schemas/UUIDv7'
+        title:
+          type: string
+        description:
+          type: string
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        created_by:
+          $ref: '#/components/schemas/UUIDv7'
+        assignee_id:
+          $ref: '#/components/schemas/NullableUUIDv7'
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Числовая версия для оптимистической блокировки; не связана с версией UUID.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        closed_at:
+          type: string
+          format: date-time
+          nullable: true
+    OffsetPagination:
+      type: object
+      required: [mode, limit, offset, total]
+      properties:
+        mode:
+          type: string
+          enum: [offset]
+        limit:
+          type: integer
+        offset:
+          type: integer
+        total:
+          type: integer
+    CursorPagination:
+      type: object
+      required: [mode, limit, next_cursor]
+      properties:
+        mode:
+          type: string
+          enum: [cursor]
+        limit:
+          type: integer
+        next_cursor:
+          type: string
+          nullable: true
+          description: Непрозрачный подписанный токен; `null` в конце списка.
+    HistoryEntry:
+      type: object
+      required: [id, task_id, changed_by, task_version, changes, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/UUIDv7'
+        task_id:
+          $ref: '#/components/schemas/UUIDv7'
+        changed_by:
+          $ref: '#/components/schemas/UUIDv7'
+        task_version:
+          type: integer
+          format: int64
+          minimum: 1
+        changes:
+          type: object
+          description: Для каждого изменённого поля — пара `old`/`new`. ID внутри — строки UUIDv7 или `null`.
+          additionalProperties:
+            type: object
+            required: [old, new]
+            properties:
+              old:
+                nullable: true
+              new:
+                nullable: true
+        created_at:
+          type: string
+          format: date-time
+    CreateCommentRequest:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: Не может состоять только из пробелов.
+    Comment:
+      type: object
+      required: [id, task_id, user_id, content, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/UUIDv7'
+        task_id:
+          $ref: '#/components/schemas/UUIDv7'
+        user_id:
+          $ref: '#/components/schemas/UUIDv7'
+        content:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    TeamStats:
+      type: object
+      required: [as_of, tasks_by_status, top_assignees, average_close_time_days, comments_total, comments_by_task]
+      properties:
+        as_of:
+          type: string
+          format: date-time
+        tasks_by_status:
+          type: object
+          required: [todo, in_progress, done]
+          properties:
+            todo:
+              type: integer
+            in_progress:
+              type: integer
+            done:
+              type: integer
+        top_assignees:
+          type: array
+          maxItems: 3
+          items:
+            type: object
+            required: [user_id, name, closed_tasks_count]
+            properties:
+              user_id:
+                $ref: '#/components/schemas/UUIDv7'
+              name:
+                type: string
+              closed_tasks_count:
+                type: integer
+        average_close_time_days:
+          type: number
+          nullable: true
+        comments_total:
+          type: integer
+        comments_by_task:
+          type: array
+          items:
+            type: object
+            required: [task_id, comments_count]
+            properties:
+              task_id:
+                $ref: '#/components/schemas/UUIDv7'
+              comments_count:
+                type: integer

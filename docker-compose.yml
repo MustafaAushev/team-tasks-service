@@ -1,0 +1,104 @@
+# Локальный запуск: mysql, redis, одноразовая миграция и api.
+# Реквизиты и порты задаются в .env (см. .env.example); значения по умолчанию для секретов отсутствуют.
+# MYSQL_PORT, REDIS_PORT и API_PORT — один и тот же порт внутри сети Compose и на хосте:
+# сервисы слушают его в контейнере и публикуются на нём же.
+name: team-tasks
+
+services:
+  mysql:
+    image: mysql:8.4.6@sha256:869218921e61d6c3c89820955d63cca42971f0e3e6c1e2792247bbd944ebc6e9
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?задайте MYSQL_ROOT_PASSWORD в .env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:?задайте MYSQL_DATABASE в .env}
+      MYSQL_USER: ${MYSQL_USER:?задайте MYSQL_USER в .env}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?задайте MYSQL_PASSWORD в .env}
+    command: ["--port=${MYSQL_PORT:-3306}"]
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "127.0.0.1:${MYSQL_PORT:-3306}:${MYSQL_PORT:-3306}"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -P ${MYSQL_PORT:-3306} -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  redis:
+    image: redis:7.4.5-alpine@sha256:bb186d083732f669da90be8b0f975a37812b15e913465bb14d845db72a4e3e08
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--port", "${REDIS_PORT:-6379}"]
+    volumes:
+      - ./deploy/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:${REDIS_PORT:-6379}"
+    # maxmemory 128mb не равен пределу памяти процесса: оставляем запас на служебные расходы.
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "${REDIS_PORT:-6379}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: .
+    image: team-tasks-service:local
+    # Пересобирать образ при каждом up: иначе Compose молча запустит старый бинарник.
+    pull_policy: build
+    command: ["migrate", "up"]
+    restart: "no"
+    # migrate читает только настройки MySQL; Redis и секреты ему не передаются.
+    environment: &mysql-env
+      # Хост — имя сервиса во внутренней сети Compose: MYSQL_HOST/REDIS_HOST из .env (127.0.0.1)
+      # предназначены для запуска на хосте, а внутри контейнера 127.0.0.1 — сам контейнер.
+      MYSQL_HOST: mysql
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  api:
+    image: team-tasks-service:local
+    command: ["api"]
+    environment:
+      <<: *mysql-env
+      REDIS_HOST: redis
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      JWT_SECRET: ${JWT_SECRET:?задайте JWT_SECRET (не менее 32 байт) в .env}
+      CURSOR_SECRET: ${CURSOR_SECRET:?задайте CURSOR_SECRET (не менее 32 байт) в .env}
+      BCRYPT_COST: ${BCRYPT_COST:-12}
+      JWT_TTL: ${JWT_TTL:-1h}
+      RATE_USER_PER_MINUTE: ${RATE_USER_PER_MINUTE:-120}
+      RATE_USER_BURST: ${RATE_USER_BURST:-20}
+      RATE_AUTH_PER_MINUTE: ${RATE_AUTH_PER_MINUTE:-60}
+      RATE_AUTH_BURST: ${RATE_AUTH_BURST:-20}
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
+      JWT_ISSUER: ${JWT_ISSUER:-team-tasks-service}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-team-tasks-api}
+      MYSQL_LOCK_WAIT: ${MYSQL_LOCK_WAIT:-5s}
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-10s}
+      REDIS_TIMEOUT: ${REDIS_TIMEOUT:-100ms}
+      SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:-10s}
+      BREAKER_FAILURES: ${BREAKER_FAILURES:-5}
+      BREAKER_OPEN: ${BREAKER_OPEN:-30s}
+      HTTP_ADDR: ":${API_PORT:-8080}"
+    ports:
+      - "${API_PORT:-8080}:${API_PORT:-8080}"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:${API_PORT:-8080}/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  mysql_data:
