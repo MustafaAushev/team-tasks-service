@@ -73,12 +73,12 @@ docker compose run --rm migrate migrate version   # то же в Compose
 
 ```bash
 make test-deps-up     # тестовые MySQL (13306) и Redis (16379, 16380 — для теста вытеснения)
-make check            # go vet, unit, все наборы с race detector, покрытие (порог 90% для бизнес-логики)
+make check            # go vet, unit, все наборы с race detector
 make e2e              # сквозной сценарий против отдельного стека Docker Compose
 make test-deps-down
 ```
 
-Отдельно: `make test-unit`, `make test-integration`, `make test-api`, `make test-race`, `make coverage`.
+Отдельно: `make test-unit`, `make test-integration`, `make test-api`, `make test-race`.
 Integration и API идут на настоящих MySQL и Redis, каждый ответ API сверяется с OpenAPI.
 
 ## Пример: от регистрации до исключения
