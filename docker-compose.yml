@@ -83,7 +83,7 @@ services:
       SHUTDOWN_TIMEOUT: ${SHUTDOWN_TIMEOUT:-10s}
       BREAKER_FAILURES: ${BREAKER_FAILURES:-5}
       BREAKER_OPEN: ${BREAKER_OPEN:-30s}
-      HTTP_ADDR: ":${API_PORT:-8080}"
+      API_PORT: ${API_PORT:-8080}
     ports:
       - "${API_PORT:-8080}:${API_PORT:-8080}"
     depends_on:

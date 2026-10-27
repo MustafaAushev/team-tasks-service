@@ -14,6 +14,7 @@ const minSecretBytes = 32
 
 // Config содержит все настройки процесса. Секреты не имеют значений по умолчанию.
 type Config struct {
+	// HTTPAddr собирается из API_PORT; тесты задают его напрямую (127.0.0.1:0).
 	HTTPAddr string
 
 	MySQLHost     string
@@ -68,7 +69,6 @@ func Load(getenv func(string) string) (Config, error) {
 	l := loader{getenv: getenv}
 
 	c := Config{
-		HTTPAddr:      l.str("HTTP_ADDR", ":8080"),
 		RedisPassword: l.str("REDIS_PASSWORD", ""),
 
 		JWTSecret:   l.secret("JWT_SECRET"),
@@ -94,6 +94,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	l.mysql(&c)
+	apiPort := l.integer("API_PORT", 8080)
+	c.HTTPAddr = ":" + strconv.Itoa(apiPort)
+	l.port("API_PORT", apiPort)
 	if c.BcryptCost < 4 || c.BcryptCost > 31 {
 		l.errs = append(l.errs, fmt.Errorf("BCRYPT_COST: %d вне диапазона 4..31", c.BcryptCost))
 	}

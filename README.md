@@ -51,7 +51,7 @@ go run ./cmd/api
 | `MYSQL_LOCK_WAIT` | `5s` | ожидание блокировки в MySQL |
 | `SHUTDOWN_TIMEOUT` | `10s` | ожидание активных запросов при остановке |
 | `BREAKER_FAILURES`, `BREAKER_OPEN` | `5`, `30s` | circuit breaker перед Redis |
-| `HTTP_ADDR` | `:8080` | адрес сервера (в Compose — из `API_PORT`) |
+| `API_PORT` | `8080` | порт HTTP-сервера |
 
 В Compose порты `MYSQL_PORT`, `REDIS_PORT`, `API_PORT` из `.env` используются и внутри сети, и для
 публикации на хост. Контейнеры обращаются к базе по именам сервисов `mysql` и `redis`: `127.0.0.1` внутри

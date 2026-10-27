@@ -40,8 +40,8 @@ func TestLoadDefaults(t *testing.T) {
 	if c.TrustProxyHeaders {
 		t.Error("доверие заголовкам прокси должно быть выключено по умолчанию")
 	}
-	if c.RedisAddr != "redis:6379" {
-		t.Errorf("адрес Redis по умолчанию: %q", c.RedisAddr)
+	if c.RedisAddr != "redis:6379" || c.HTTPAddr != ":8080" {
+		t.Errorf("адреса по умолчанию: Redis %q, HTTP %q", c.RedisAddr, c.HTTPAddr)
 	}
 }
 
@@ -78,6 +78,7 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		"BCRYPT_COST":          "2",
 		"MYSQL_PORT":           "abc",
 		"REDIS_PORT":           "70000",
+		"API_PORT":             "0",
 		"REDIS_HOST":           "",
 		"RATE_USER_PER_MINUTE": "0",
 		"RATE_AUTH_BURST":      "0",
@@ -105,12 +106,13 @@ func TestLoadOverrides(t *testing.T) {
 	env["BCRYPT_COST"] = "10"
 	env["TRUST_PROXY_HEADERS"] = "true"
 	env["REDIS_PORT"] = "6380"
+	env["API_PORT"] = "9090"
 	c, err := load(env)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.RateUserPerMinute != 5 || c.RateUserBurst != 2 || c.JWTTTL != 15*time.Minute ||
-		c.BcryptCost != 10 || !c.TrustProxyHeaders || c.RedisAddr != "redis:6380" {
+		c.BcryptCost != 10 || !c.TrustProxyHeaders || c.RedisAddr != "redis:6380" || c.HTTPAddr != ":9090" {
 		t.Errorf("переопределения не применены: %+v", c)
 	}
 }
