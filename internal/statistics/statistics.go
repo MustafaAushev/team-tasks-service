@@ -21,20 +21,14 @@ type Report struct {
 	TopAssignees []Assignee     // не более трёх: count DESC, user_id ASC
 	// AvgCloseDays — среднее created_at → closed_at текущих done в сутках по 24 часа,
 	// 6 знаков; nil, если закрытых задач нет.
-	AvgCloseDays   *float64
-	CommentsTotal  int
-	CommentsByTask []TaskComments // все задачи команды, включая нули, task_id ASC
+	AvgCloseDays  *float64
+	CommentsTotal int // все комментарии к задачам команды
 }
 
 type Assignee struct {
 	UserID      uuid.UUID
 	Name        string
 	ClosedTasks int
-}
-
-type TaskComments struct {
-	TaskID   uuid.UUID
-	Comments int
 }
 
 // Store — то, что отчёту нужно от хранилища.

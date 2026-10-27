@@ -91,7 +91,7 @@ func TestTeamReport(t *testing.T) {
 	t2 := e.taskAt(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC), owner, tm, &b).status(from.Add(-time.Microsecond), done)
 	t5 := e.taskAt(day(24, 0, 0), owner, tm, &b).status(day(25, 6, 0), done).comments(2)
 	// Повторно открытая задача B не считается закрытой.
-	t13 := e.taskAt(day(2, 0, 0), owner, tm, &b).status(day(3, 0, 0), done).status(day(4, 0, 0), todo)
+	e.taskAt(day(2, 0, 0), owner, tm, &b).status(day(3, 0, 0), done).status(day(4, 0, 0), todo)
 	// C: два закрытия; у одного несколько комментариев — они не умножают агрегаты.
 	t3 := e.taskAt(day(9, 0, 0), owner, tm, &c).status(day(10, 0, 0), done).comments(3)
 	t4 := e.taskAt(day(19, 0, 0), owner, tm, &c).status(day(20, 18, 0), done)
@@ -112,8 +112,8 @@ func TestTeamReport(t *testing.T) {
 	}
 	mustExecDB(t, e.db, `DELETE FROM team_members WHERE team_id = ? AND user_id = ?`, platform.IDBytes(tm), platform.IDBytes(gone))
 	// Открытые задачи.
-	t15 := e.taskAt(day(20, 0, 0), owner, tm, &c).status(day(21, 0, 0), "in_progress")
-	t16 := e.taskAt(day(22, 0, 0), owner, tm, nil)
+	e.taskAt(day(20, 0, 0), owner, tm, &c).status(day(21, 0, 0), "in_progress")
+	e.taskAt(day(22, 0, 0), owner, tm, nil)
 
 	// Вторая команда с закрытиями и комментариями того же исполнителя не влияет на отчёт.
 	other := e.teamWith(owner, map[uuid.UUID]team.Role{c: team.RoleMember})
@@ -150,7 +150,7 @@ func TestTeamReport(t *testing.T) {
 	}
 
 	// Среднее: все текущие done за всё время (включая закрытые до окна и без исполнителя), повторно
-	// закрытая t14 — от исходного created_at до последнего closed_at; открытые t13, t15, t16 не входят.
+	// закрытая t14 — от исходного created_at до последнего closed_at; открытые задачи не входят.
 	closed := []*statsTask{t1, t2, t3, t4, t5, t6, t7, t8, t12, t14}
 	closed = append(closed, goneTasks...)
 	var sum time.Duration
@@ -165,19 +165,9 @@ func TestTeamReport(t *testing.T) {
 		t.Fatalf("t14: %+v", t14.t)
 	}
 
-	// Комментарии: 2 + 3, все 16 задач команды с нулями, task_id ASC.
-	if rep.CommentsTotal != 5 || len(rep.CommentsByTask) != 16 {
-		t.Fatalf("комментарии: %d, задач %d", rep.CommentsTotal, len(rep.CommentsByTask))
-	}
-	counts := map[uuid.UUID]int{}
-	for i, tc := range rep.CommentsByTask {
-		counts[tc.TaskID] = tc.Comments
-		if i > 0 && bytes.Compare(rep.CommentsByTask[i-1].TaskID[:], tc.TaskID[:]) >= 0 {
-			t.Fatal("comments_by_task не в порядке task_id ASC")
-		}
-	}
-	if counts[t3.t.ID] != 3 || counts[t5.t.ID] != 2 || counts[t13.t.ID] != 0 || counts[t15.t.ID] != 0 || counts[t16.t.ID] != 0 {
-		t.Fatalf("по задачам: %v", counts)
+	// Комментарии: 2 + 3 к задачам команды.
+	if rep.CommentsTotal != 5 {
+		t.Fatalf("комментарии: %d, ожидалось 5", rep.CommentsTotal)
 	}
 
 	// Права: admin видит отчёт, member — 403, бывший участник и посторонний — 404, как и чужая команда.
@@ -209,7 +199,7 @@ func TestTeamReportEmpty(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(rep.ByStatus) != 3 || rep.ByStatus["todo"]+rep.ByStatus["in_progress"]+rep.ByStatus["done"] != 0 ||
-		len(rep.TopAssignees) != 0 || rep.AvgCloseDays != nil || rep.CommentsTotal != 0 || len(rep.CommentsByTask) != 0 {
+		len(rep.TopAssignees) != 0 || rep.AvgCloseDays != nil || rep.CommentsTotal != 0 {
 		t.Fatalf("пустой отчёт: %+v", rep)
 	}
 }

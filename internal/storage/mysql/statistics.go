@@ -32,10 +32,10 @@ func (s StatsStore) MemberRole(ctx context.Context, teamID, userID uuid.UUID) (t
 //     в микросекундах: TIMESTAMPDIFF(DAY) отбросил бы дробную часть суток.
 //   - top_assignees — исполнители по задачам, закрытым в окне [from, asOf]; место — по числу закрытий,
 //     при равенстве — по user_id.
-//   - comment_counts — комментарии, предварительно агрегированные по задаче: так они не умножают строки
-//     остальных метрик. LEFT JOIN от base даёт нули и читает комментарии по индексу задачи.
+//   - comment_total — общее число комментариев к задачам команды. Считается в отдельном CTE, поэтому
+//     JOIN с комментариями не умножает строки остальных метрик; комментарии читаются по индексу задачи.
 //
-// Списки возвращаются JSON-массивами. JSON_ARRAYAGG в MySQL не гарантирует порядок элементов, поэтому
+// Топ возвращается JSON-массивом. JSON_ARRAYAGG в MySQL не гарантирует порядок элементов, поэтому
 // каждый элемент несёт позицию rn из SQL, а порядок восстанавливается при разборе.
 // Метрики считаются по текущему состоянию задач (status, assignee_id, closed_at), не по журналу.
 const reportSQL = `
@@ -59,11 +59,8 @@ top_assignees AS (
     WHERE status = 'done' AND assignee_id IS NOT NULL AND closed_at BETWEEN ? AND ?
     GROUP BY assignee_id
 ),
-comment_counts AS (
-    SELECT b.id AS task_id, COUNT(c.id) AS comments, ROW_NUMBER() OVER (ORDER BY b.id) AS rn
-    FROM base b
-    LEFT JOIN task_comments c ON c.task_id = b.id
-    GROUP BY b.id
+comment_total AS (
+    SELECT COUNT(*) AS comments FROM base b JOIN task_comments c ON c.task_id = b.id
 )
 SELECT
     s.todo,
@@ -75,12 +72,8 @@ SELECT
             JSON_ARRAY())
      FROM top_assignees t JOIN users u ON u.id = t.assignee_id
      WHERE t.rn <= 3) AS top_assignees,
-    (SELECT COALESCE(SUM(cc.comments), 0) FROM comment_counts cc) AS comments_total,
-    (SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT(
-                'task_id', BIN_TO_UUID(cc.task_id), 'comments', cc.comments, 'rn', cc.rn)),
-            JSON_ARRAY())
-     FROM comment_counts cc) AS comments_by_task
-FROM summary s`
+    ct.comments AS comments_total
+FROM summary s CROSS JOIN comment_total ct`
 
 // ReportQuery возвращает текст и параметры запроса отчёта (для EXPLAIN в тестах).
 func ReportQuery(teamID uuid.UUID, from, asOf time.Time) (string, []any) {
@@ -95,11 +88,6 @@ type (
 		ClosedTasks int    `json:"closed_tasks"`
 		Rn          int    `json:"rn"`
 	}
-	taskCommentsRow struct {
-		TaskID   string `json:"task_id"`
-		Comments int    `json:"comments"`
-		Rn       int    `json:"rn"`
-	}
 )
 
 func (s StatsStore) Report(ctx context.Context, teamID uuid.UUID, from, asOf time.Time) (statistics.Report, error) {
@@ -107,10 +95,10 @@ func (s StatsStore) Report(ctx context.Context, teamID uuid.UUID, from, asOf tim
 	var (
 		todo, inProgress, done, commentsTotal int
 		avgClose                              sql.NullFloat64
-		topRaw, commentsRaw                   []byte
+		topRaw                                []byte
 	)
 	if err := s.DB.QueryRowContext(ctx, query, args...).Scan(
-		&todo, &inProgress, &done, &avgClose, &topRaw, &commentsTotal, &commentsRaw); err != nil {
+		&todo, &inProgress, &done, &avgClose, &topRaw, &commentsTotal); err != nil {
 		return statistics.Report{}, fmt.Errorf("team report: %w", err)
 	}
 
@@ -118,19 +106,13 @@ func (s StatsStore) Report(ctx context.Context, teamID uuid.UUID, from, asOf tim
 	if err := json.Unmarshal(topRaw, &top); err != nil {
 		return statistics.Report{}, fmt.Errorf("team report top_assignees: %w", err)
 	}
-	var comments []taskCommentsRow
-	if err := json.Unmarshal(commentsRaw, &comments); err != nil {
-		return statistics.Report{}, fmt.Errorf("team report comments_by_task: %w", err)
-	}
 	sort.Slice(top, func(i, j int) bool { return top[i].Rn < top[j].Rn })
-	sort.Slice(comments, func(i, j int) bool { return comments[i].Rn < comments[j].Rn })
 
 	r := statistics.Report{
-		AsOf:           asOf,
-		ByStatus:       map[string]int{"todo": todo, "in_progress": inProgress, "done": done},
-		TopAssignees:   make([]statistics.Assignee, 0, len(top)),
-		CommentsTotal:  commentsTotal,
-		CommentsByTask: make([]statistics.TaskComments, 0, len(comments)),
+		AsOf:          asOf,
+		ByStatus:      map[string]int{"todo": todo, "in_progress": inProgress, "done": done},
+		TopAssignees:  make([]statistics.Assignee, 0, len(top)),
+		CommentsTotal: commentsTotal,
 	}
 	if avgClose.Valid {
 		d := avgClose.Float64
@@ -142,13 +124,6 @@ func (s StatsStore) Report(ctx context.Context, teamID uuid.UUID, from, asOf tim
 			return statistics.Report{}, fmt.Errorf("team report user_id: %w", err)
 		}
 		r.TopAssignees = append(r.TopAssignees, statistics.Assignee{UserID: id, Name: a.Name, ClosedTasks: a.ClosedTasks})
-	}
-	for _, c := range comments {
-		id, err := uuid.Parse(c.TaskID)
-		if err != nil {
-			return statistics.Report{}, fmt.Errorf("team report task_id: %w", err)
-		}
-		r.CommentsByTask = append(r.CommentsByTask, statistics.TaskComments{TaskID: id, Comments: c.Comments})
 	}
 	return r, nil
 }

@@ -30,13 +30,15 @@ func TestTeamStatsAccessHTTP(t *testing.T) {
 	r := c.s.Do(testutil.Request{Method: "POST", Path: "/api/v1/tasks", Token: c.outsider.token,
 		Body: map[string]any{"team_id": other, "title": "Чужая", "status": "done"}})
 	expect(t, r, 201, "")
+	expect(t, c.s.Do(testutil.Request{Method: "POST", Path: "/api/v1/tasks/" + r.Map(t)["id"].(string) + "/comments",
+		Token: c.outsider.token, Body: map[string]any{"content": "чужой"}}), 201, "")
 
 	for _, u := range []user{c.owner, c.admin} {
 		r := stats(c.s, u, c.team)
 		expect(t, r, http.StatusOK, "")
 		body := r.Map(t)
 		if body["tasks_by_status"].(map[string]any)["todo"] != float64(1) || body["tasks_by_status"].(map[string]any)["done"] != float64(0) ||
-			len(body["comments_by_task"].([]any)) != 1 {
+			body["comments_total"] != float64(0) {
 			t.Fatalf("отчёт: %s", r.Body)
 		}
 	}
@@ -66,7 +68,6 @@ func TestTeamStatsAccessHTTP(t *testing.T) {
 		"top_assignees":           `[]`,
 		"average_close_time_days": `null`,
 		"comments_total":          `0`,
-		"comments_by_task":        `[]`,
 	} {
 		if string(empty[field]) != want {
 			t.Errorf("%s = %s, ожидалось %s", field, empty[field], want)
@@ -133,9 +134,6 @@ func TestTeamStatsMatchesOpenAPIExample(t *testing.T) {
 
 	// ID в примере условные: подставляем фактические и сравниваем ответ целиком.
 	example["top_assignees"].([]any)[0].(map[string]any)["user_id"] = ann.id
-	for i, it := range example["comments_by_task"].([]any) {
-		it.(map[string]any)["task_id"] = ids[i]
-	}
 	want, _ := json.Marshal(example)
 	have, _ := json.Marshal(got)
 	if string(want) != string(have) {

@@ -531,8 +531,7 @@ paths:
           интервале `[as_of − 30 суток, as_of]`; порядок: число по убыванию, затем `user_id` по возрастанию.
         * `average_close_time_days` — среднее время от `created_at` до `closed_at` всех текущих `done`
           за всё время, в сутках по 24 часа, 6 знаков; `null` без закрытых задач.
-        * `comments_total` и `comments_by_task` — по всем задачам команды (включая нули, порядок `task_id`
-          по возрастанию, без пагинации).
+        * `comments_total` — общее число комментариев к задачам команды.
 
         Метрики считаются по **текущему** состоянию задач, а не по журналу: переназначенная закрытая задача
         засчитывается новому исполнителю, снятие исполнителя или исключение участника убирает его задачи из
@@ -560,15 +559,6 @@ paths:
                     closed_tasks_count: 2
                 average_close_time_days: 2
                 comments_total: 5
-                comments_by_task:
-                  - task_id: 019a246a-1000-7d44-b222-112233445566
-                    comments_count: 2
-                  - task_id: 019a246a-2000-7e55-8333-223344556677
-                    comments_count: 0
-                  - task_id: 019a246a-3000-7f66-9444-334455667788
-                    comments_count: 3
-                  - task_id: 019a246a-4000-7a77-a555-445566778899
-                    comments_count: 0
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -1674,7 +1664,7 @@ components:
           format: date-time
     TeamStats:
       type: object
-      required: [as_of, tasks_by_status, top_assignees, average_close_time_days, comments_total, comments_by_task]
+      required: [as_of, tasks_by_status, top_assignees, average_close_time_days, comments_total]
       properties:
         as_of:
           type: string
@@ -1707,13 +1697,3 @@ components:
           nullable: true
         comments_total:
           type: integer
-        comments_by_task:
-          type: array
-          items:
-            type: object
-            required: [task_id, comments_count]
-            properties:
-              task_id:
-                $ref: '#/components/schemas/UUIDv7'
-              comments_count:
-                type: integer
