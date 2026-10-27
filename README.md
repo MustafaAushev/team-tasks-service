@@ -83,7 +83,7 @@ Integration и API идут на настоящих MySQL и Redis, каждый
 
 ## Примеры запросов
 
-Полный список методов, тел и ответов — в Swagger UI: http://localhost:8080/docs/.
+Полный список методов, тел и ответов — в Swagger UI (`/docs/`).
 
 ```bash
 API=http://localhost:8080/api/v1
